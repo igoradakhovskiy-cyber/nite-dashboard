@@ -44,11 +44,22 @@ jobs:
           PLAN_CPL: '20'
         run: node scripts/fetch-meta.mjs
 
-      # NOTE: no CRM step on purpose — this project has no lead export yet, so the
-      # dataset ships without a `crm` block and every qualified-lead block hides
-      # itself. To switch it on later: share the sheet by link, set the SHEET_ID
-      # repo variable, retune COL + EXPECTED_HEADER in scripts/fetch-crm.mjs to that
-      # sheet's layout, and add the step back — see docs/REPLICATE.md § CRM-слой.
+      # CRM layer: the Bitrix24 export that the Apps Script bound to the sheet keeps
+      # fresh (scripts/bitrix-leads-to-sheets.gs). Not --strict on purpose: a broken
+      # sheet keeps the last deployed CRM layer and flags it in the UI, while the fresh
+      # Meta numbers still deploy. DASHBOARD_PASSWORD lets it read that layer back.
+      # CRM_MIN_DATE: the qual rule (Re-contact and beyond) holds only for leads from
+      # 14.10.2026 — earlier history is excluded on purpose (NITE decision, 19.10).
+      # SHEET_ID is a secret, not a variable, on purpose: this repo and its Actions
+      # logs are public, the sheet is readable by link, and secrets get masked in logs.
+      - name: Join CRM data from Google Sheets
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_TAB: leads
+          CRM_MIN_DATE: '2026-10-14'
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+          DASHBOARD_URL: https://igoradakhovskiy-cyber.github.io/nite-dashboard/
+        run: node scripts/fetch-crm.mjs
 
       - name: Encrypt dataset with the dashboard password
         env:

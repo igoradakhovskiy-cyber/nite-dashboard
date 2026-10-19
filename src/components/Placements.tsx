@@ -26,6 +26,7 @@ function byPlatform(rows: PlacementAgg[]): PlacementAgg[] {
       continue
     }
     cur.spend += r.spend
+    cur.spend_crm += r.spend_crm
     cur.impressions += r.impressions
     cur.clicks += r.clicks
     cur.leads += r.leads
@@ -35,7 +36,7 @@ function byPlatform(rows: PlacementAgg[]): PlacementAgg[] {
   for (const r of m.values()) {
     r.ctr = r.impressions ? (r.clicks / r.impressions) * 100 : 0
     r.cpl = r.leads ? r.spend / r.leads : 0
-    r.cpql_est = r.qual_est && r.qual_est >= 0.5 ? r.spend / r.qual_est : null
+    r.cpql_est = r.qual_est && r.qual_est >= 0.5 ? r.spend_crm / r.qual_est : null
   }
   return [...m.values()].sort((a, b) => b.spend - a.spend)
 }
@@ -72,11 +73,12 @@ export default function Placements({
   const totals = rows.reduce(
     (o, r) => {
       o.spend += r.spend
+      o.spend_crm += r.spend_crm
       o.leads += r.leads
       o.qual += r.qual_est || 0
       return o
     },
-    { spend: 0, leads: 0, qual: 0 },
+    { spend: 0, spend_crm: 0, leads: 0, qual: 0 },
   )
 
   return (
@@ -198,7 +200,7 @@ export default function Placements({
                   )}
                   {hasCrm && (
                     <td className="py-2 text-right tabular text-mute italic pr-1 whitespace-nowrap">
-                      {totals.qual >= 0.5 ? '≈' + moneySmart(totals.spend / totals.qual) : '—'}
+                      {totals.qual >= 0.5 ? '≈' + moneySmart(totals.spend_crm / totals.qual) : '—'}
                     </td>
                   )}
                 </tr>

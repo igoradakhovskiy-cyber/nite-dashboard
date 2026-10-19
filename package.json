@@ -12,7 +12,7 @@
     "crm": "node scripts/fetch-crm.mjs",
     "crm:verify": "node scripts/fetch-crm.mjs --verify",
     "encrypt": "node scripts/encrypt-data.mjs",
-    "data": "node scripts/fetch-meta.mjs && node scripts/encrypt-data.mjs"
+    "data": "node scripts/fetch-meta.mjs && node scripts/fetch-crm.mjs && node scripts/encrypt-data.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

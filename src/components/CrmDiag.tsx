@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Dataset } from '../types'
-import { int } from '../lib/format'
+import { dateShort, int } from '../lib/format'
 import { COLORS } from '../config'
 
 /**
@@ -13,10 +13,14 @@ export default function CrmDiag({ ds }: { ds: Dataset }) {
   const [open, setOpen] = useState(false)
   if (!ds.crm) return null
   const c = ds.crm
-  const metaLeads = ds.daily.reduce((s, r) => s + r.leads, 0)
+  // Compared with Meta inside the CRM window only: the CRM history before date_min is
+  // excluded on purpose, so the whole-window lead count would read as a broken join.
+  const from = c.date_min || ds.date_min
+  const metaLeads = ds.daily.filter((r) => r.date >= from).reduce((s, r) => s + r.leads, 0)
   const rate = metaLeads ? (c.rows_matched / metaLeads) * 100 : 0
   const u = c.unmatched
-  const skipped = u.macro + u.unknown_campaign + u.unknown_ad + u.no_utm
+  // Leads with no UTM at all (WhatsApp, calls) are not ad traffic — not a join failure.
+  const skipped = u.macro + u.unknown_campaign + u.unknown_ad
 
   const reasons: { label: string; n: number; note: string }[] = [
     {
@@ -34,7 +38,7 @@ export default function CrmDiag({ ds }: { ds: Dataset }) {
       n: u.unknown_ad,
       note: 'лид засчитан кампании, но в галерее креативов не показан',
     },
-    { label: 'без UTM', n: u.no_utm, note: 'заявка пришла не из рекламы' },
+    { label: 'без UTM', n: u.no_utm, note: 'заявка пришла не из рекламы (WhatsApp, звонок, офис)' },
   ].filter((r) => r.n > 0)
 
   const tone = rate >= 80 ? COLORS.pos : rate >= 50 ? COLORS.warn : COLORS.neg
@@ -48,7 +52,7 @@ export default function CrmDiag({ ds }: { ds: Dataset }) {
         <span className="flex items-center gap-2 text-sm">
           <span className="h-2 w-2 rounded-full" style={{ background: tone }} />
           <span className="text-mute">
-            CRM сопоставлена с рекламой:{' '}
+            CRM сопоставлена с рекламой{c.date_min ? ` с ${dateShort(c.date_min)}` : ''}:{' '}
             <span className="text-ink tabular font-medium">
               {int(c.rows_matched)} из {int(metaLeads)}
             </span>{' '}
@@ -74,10 +78,13 @@ export default function CrmDiag({ ds }: { ds: Dataset }) {
             </div>
           ))}
           <p className="text-dim pt-1">
-            Разрыв в {int(Math.max(0, metaLeads - c.rows_matched))} лид(ов) — это в основном кампании,
-            которые ведут в другую воронку и в эту выгрузку CRM не попадают. Строк во вкладке{' '}
-            <span className="text-mute">{c.tab}</span>: {int(c.rows_total)}, из них в периоде{' '}
-            {int(c.rows_in_window)}.
+            {metaLeads > c.rows_matched &&
+              `Разрыв в ${int(metaLeads - c.rows_matched)} лид(ов) — заявки, которые пиксель Meta ` +
+                'засчитал, а в CRM они не дошли с UTM (повторная заявка, обрыв UTM). '}
+            {c.date_min &&
+              `Лиды до ${dateShort(c.date_min)} не учитываются: тогда CRM вели по другим правилам. `}
+            Строк во вкладке <span className="text-mute">{c.tab}</span>: {int(c.rows_total)}, из них в
+            окне CRM {int(c.rows_in_window)}.
           </p>
         </div>
       )}

@@ -6,9 +6,11 @@ import {
   buildPresets,
   filterCrm,
   filterRows,
+  setCrmWindow,
   type Filters,
 } from './lib/data'
 import { decryptDataset, fetchEncrypted, type EncBlob } from './lib/crypto'
+import { dateFull } from './lib/format'
 import PasswordGate from './components/PasswordGate'
 import Header from './components/Header'
 import KpiGrid from './components/KpiGrid'
@@ -51,6 +53,7 @@ export default function App() {
     if (!enc) return false
     try {
       const d = await decryptDataset(enc, pw)
+      setCrmWindow(d) // before setDs: every aggregate() on first render already needs it
       setDs(d)
       setFilters({ from: d.date_min, to: d.date_max, lang: 'all' })
       sessionStorage.setItem(PW_KEY, pw)
@@ -95,7 +98,8 @@ export default function App() {
             <Funnel metrics={metrics} />
             <LangSplit rows={rows} idx={idx} total={metrics} crmRows={crmRows} />
           </div>
-          {ds.crm && (
+          {/* hidden for a period that ends before the CRM window — "no leads" would be a lie */}
+          {ds.crm && (!ds.crm.date_min || filters.to >= ds.crm.date_min) && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <SalesFunnel ds={ds} idx={idx} filters={filters} />
               <GeoTable ds={ds} idx={idx} filters={filters} />
@@ -113,7 +117,8 @@ export default function App() {
           </span>
           <span>
             Обновляется автоматически каждые 3 часа · лид = событие «lead»
-            {ds.crm && ' · квал = «Qualified» в CRM'}
+            {ds.crm &&
+              ` · квал = Re-contact и дальше в Bitrix${ds.crm.date_min ? `, с ${dateFull(ds.crm.date_min)}` : ''}`}
           </span>
         </footer>
       </div>

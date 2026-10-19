@@ -29,6 +29,18 @@ export function buildIndex(ds: Dataset): Index {
   }
 }
 
+/**
+ * First day the CRM layer is valid for. On Nite the qual rule (Re-contact and beyond) was
+ * agreed with the current manager for leads from 14.10.2026 only — earlier managers ran the
+ * CRM differently, so that history is excluded upstream. Spend before this day must never
+ * divide quals, or every CPQL on the page quietly inflates. Set once per loaded dataset.
+ */
+let crmFrom: string | null = null
+export function setCrmWindow(ds: Dataset) {
+  crmFrom = ds.crm?.date_min || null
+}
+const inCrmWindow = (date: string) => !crmFrom || date >= crmFrom
+
 export const EMPTY_METRICS: Metrics = {
   spend: 0,
   impressions: 0,
@@ -38,6 +50,7 @@ export const EMPTY_METRICS: Metrics = {
   cpm: 0,
   cpc: 0,
   ctr: 0,
+  spend_crm: 0,
   crm_leads: null,
   qual_leads: null,
   cpql: null,
@@ -50,18 +63,27 @@ export const EMPTY_METRICS: Metrics = {
  */
 export function aggregate(rows: DailyRow[], crmRows?: CrmDaily[] | null): Metrics {
   let spend = 0,
+    spend_crm = 0,
     impressions = 0,
     clicks = 0,
     leads = 0
+  let covered = false
   for (const r of rows) {
     spend += r.spend
     impressions += r.impressions
     clicks += r.clicks
     leads += r.leads
+    if (inCrmWindow(r.date)) {
+      spend_crm += r.spend
+      covered = true
+    }
   }
   let crm_leads: number | null = null
   let qual_leads: number | null = null
-  if (crmRows) {
+  // A period (or a creative) that lives entirely before the CRM window has no CRM truth
+  // to show: null, not a fake 0. CreativeGallery passes one synthetic all-zero row per
+  // creative, so "has rows" alone is not enough — the rows must carry something.
+  if (crmRows && (covered || crmRows.some((c) => c.leads > 0 || c.qual > 0))) {
     crm_leads = 0
     qual_leads = 0
     for (const c of crmRows) {
@@ -78,9 +100,10 @@ export function aggregate(rows: DailyRow[], crmRows?: CrmDaily[] | null): Metric
     cpm: impressions ? (spend / impressions) * 1000 : 0,
     cpc: clicks ? spend / clicks : 0,
     ctr: impressions ? (clicks / impressions) * 100 : 0,
+    spend_crm,
     crm_leads,
     qual_leads,
-    cpql: qual_leads ? spend / qual_leads : qual_leads === 0 ? 0 : null,
+    cpql: qual_leads ? spend_crm / qual_leads : qual_leads === 0 ? 0 : null,
     qual_rate: crm_leads ? ((qual_leads || 0) / crm_leads) * 100 : crm_leads === 0 ? 0 : null,
   }
 }
@@ -196,6 +219,8 @@ export interface PlacementAgg {
   platform: string
   position: string
   spend: number
+  /** Spend inside the CRM window — what cpql_est divides. */
+  spend_crm: number
   impressions: number
   clicks: number
   ctr: number
@@ -240,7 +265,10 @@ export function placementTable(
     return { rows: [], qual_unattributed: 0, qual_total: 0, estimated: false }
   }
 
-  const agg = new Map<number, { spend: number; impressions: number; clicks: number; leads: number }>()
+  const agg = new Map<
+    number,
+    { spend: number; spend_crm: number; impressions: number; clicks: number; leads: number }
+  >()
   // ad name -> placement index -> leads, for the qual split
   const adSplit = new Map<string, Map<number, number>>()
   const adLeadTotal = new Map<string, number>()
@@ -250,8 +278,9 @@ export function placementTable(
     const ad = idx.adById.get(adId)
     if (f.lang !== 'all' && (!ad || ad.lang !== f.lang)) continue
 
-    const a = agg.get(pi) || { spend: 0, impressions: 0, clicks: 0, leads: 0 }
+    const a = agg.get(pi) || { spend: 0, spend_crm: 0, impressions: 0, clicks: 0, leads: 0 }
     a.spend += spend
+    if (inCrmWindow(date)) a.spend_crm += spend
     a.impressions += impressions
     a.clicks += clicks
     a.leads += leads
@@ -301,13 +330,14 @@ export function placementTable(
         platform: p.platform,
         position: p.position,
         spend: a.spend,
+        spend_crm: a.spend_crm,
         impressions: a.impressions,
         clicks: a.clicks,
         ctr: a.impressions ? (a.clicks / a.impressions) * 100 : 0,
         leads: a.leads,
         cpl: a.leads ? a.spend / a.leads : 0,
         qual_est: qual,
-        cpql_est: qual && qual >= 0.5 ? a.spend / qual : null,
+        cpql_est: qual && qual >= 0.5 ? a.spend_crm / qual : null,
         spend_share: totalSpend ? (a.spend / totalSpend) * 100 : 0,
       }
     })

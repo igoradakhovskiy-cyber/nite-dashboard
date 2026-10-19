@@ -1,25 +1,31 @@
 #!/usr/bin/env node
 /**
- * CRM layer from Google Sheets — DORMANT on this project.
+ * CRM layer from Google Sheets — Nite / Bitrix24.
  *
- * Nite has no lead export yet, so this script is not wired into the CI workflow
- * and the dashboard renders without a `crm` block (every qualified-lead card
- * hides itself). It is kept verbatim from the Desa build as the reference
- * implementation: when a sheet appears, retune COL + EXPECTED_HEADER below to
- * that sheet's layout, set SHEET_ID, and add the step back to deploy.yml.
+ * Source: the "NITE — лиды из Bitrix24" sheet, tab `leads`, which an Apps Script
+ * (scripts/bitrix-leads-to-sheets.gs, bound to the sheet) refreshes from the
+ * nitecrm.bitrix24.com webhook every 15 minutes.
  *
  * Runs AFTER fetch-meta.mjs: reads .data/latest.json, pulls the CRM export from
  * the sheet tab, joins it onto the Meta data by UTM, and writes the `crm` block
  * back into the same file.
  *
- * The join works because every ad carries
- *   utm_source=facebook&utm_campaign={{campaign.name}}&utm_content={{ad.name}}
- * so `UTM Campaign` is the campaign name verbatim and `UTM Content` is the ad name.
+ * Join: every ad carries utm_campaign={{campaign.name}}, utm_content={{ad.name}},
+ * utm_term={{adset.id}} and utm_id={{campaign.id}}. Campaigns are matched by id
+ * first (survives renames) and by name as a fallback; ads by name; ad sets by id.
+ *
+ * Qual = the sheet's «Валидный» column: the lead has been in Re-contact or
+ * Qualified at least once (NITE rule agreed 19.10.2026). That rule only holds for
+ * leads from CRM_MIN_DATE on — earlier managers ran the CRM differently — so older
+ * rows are dropped here and the UI divides only post-cutoff spend by quals.
  *
  * The sheet is readable by link, so this is a plain unauthenticated fetch of the
  * gviz CSV export — no OAuth, no service account, no API key. If the sheet is ever
  * made private this script fails loudly and the fallback is a service account +
  * Sheets API with the JSON key in a GitHub Secret.
+ *
+ * Local dry run without link sharing: CRM_CSV_FILE=path/to/leads.csv reads the
+ * export from disk instead of the network.
  *
  * No npm deps — Node 18+ global fetch only.
  */
@@ -43,8 +49,10 @@ if (!SHEET_ID) {
   console.error('✖ SHEET_ID env is required — this project has no CRM sheet configured yet')
   process.exit(1)
 }
-const SHEET_TAB = process.env.SHEET_TAB || 'client_data'
-const QUAL_VALUE = (process.env.QUAL_VALUE || 'qualified').toLowerCase()
+const SHEET_TAB = process.env.SHEET_TAB || 'leads'
+/** First lead date the qual rule applies to (NITE, agreed with the current manager). */
+const CRM_MIN_DATE = process.env.CRM_MIN_DATE || '2026-10-14'
+const CRM_CSV_FILE = process.env.CRM_CSV_FILE || ''
 const VERIFY = process.argv.includes('--verify')
 /** Local runs abort on a bad sheet; CI keeps the last good layer and deploys anyway. */
 const STRICT = process.argv.includes('--strict')
@@ -59,32 +67,57 @@ const DASHBOARD_URL =
 const ROWS_DROP_LIMIT = 0.4
 
 /**
- * Layout below is Desa's, NOT Nite's — retune both maps against the real export
- * before enabling this script.
+ * Layout of the `leads` tab written by bitrix-leads-to-sheets.gs. The Apps Script only
+ * ever appends columns at the end, so these indexes are stable.
  *
- * Columns are addressed BY INDEX, not by header name, on purpose: that sheet had
- * two different columns both titled "Квалификация" — F (index 5, values
- * ""/"Qualified") and Z (index 25, values ""/"1", a different definition).
- * A name lookup would silently grab the wrong one.
+ * Columns are addressed BY INDEX, not by header name, on purpose: the sheet has two
+ * different quality columns — «Квалификация» (index 20, the manager's hot/warm/cold
+ * field, mostly empty) and «Валидный» (index 34, the rule we report). A name lookup
+ * would one day grab the wrong one.
  */
 const COL = {
-  date: 1, // B  Дата создания        DD.MM.YYYY
-  qual: 5, // F  Квалификация         "" | "Qualified"   ← the one we want
-  pipeline: 4, // E  Воронка
-  status: 6, // G  Статус
-  country: 7, // H  Страна
-  campaign: 14, // O  UTM Campaign       = {{campaign.name}}
-  ad: 15, // P  UTM Content          = {{ad.name}}
+  date: 2, // C  Создан                 YYYY-MM-DD HH:mm (Europe/Kiev)
+  status: 5, // F  Код стадии             Bitrix STATUS_ID
+  campaign: 12, // M  utm_campaign           = {{campaign.name}}
+  ad: 13, // N  utm_content            = {{ad.name}}
+  adset: 14, // O  utm_term (adset id)    = {{adset.id}}
+  campaignId: 15, // P  utm_id (campaign id)   = {{campaign.id}}
+  country: 19, // T  Страна
+  qual: 34, // AI Валидный               "1" | "0"   ← the one we want
 }
 
 /** Header cells that must match exactly, or the tab/layout changed under us. */
 const EXPECTED_HEADER = {
-  1: 'Дата создания',
-  5: 'Квалификация',
-  6: 'Статус',
-  7: 'Страна',
-  14: 'UTM Campaign',
-  15: 'UTM Content',
+  2: 'Создан',
+  5: 'Код стадии',
+  12: 'utm_campaign',
+  13: 'utm_content',
+  14: 'utm_term (adset id)',
+  15: 'utm_id (campaign id)',
+  19: 'Страна',
+  34: 'Валидный',
+}
+
+/**
+ * Bitrix lead STATUS_ID → ladder label. Numbered in Bitrix pipeline order; losses carry
+ * "×" so the UI sorts them below the ladder. Keep in sync with STATUS_ORDER in src/config.ts.
+ */
+const STATUS_LABEL = {
+  NEW: '01. Новый',
+  IN_PROCESS: '02. Messengers',
+  UC_8QBXXF: '03. BASE',
+  PROCESSED: '04. Не дозвонились 1 раз',
+  UC_EY2ISH: '05. Не дозвонились 2 раза',
+  UC_PT6TPS: '06. Не дозвонились 3 раза',
+  UC_JKBEXL: '07. Re-contact',
+  CONVERTED: '08. Qualified',
+  2: '× Не дозвонились',
+  JUNK: '× Нецелевой',
+  UC_M1CKOJ: '× Неверный номер',
+  9: '× Дубль / спам / тест',
+  12: '× Не рассматривает покупку',
+  13: '× Нет контактных данных',
+  3: '× Другое',
 }
 
 // ------------------------------------------------------------- utilities ----
@@ -126,10 +159,10 @@ const cell = (row, i) => (row[i] === undefined ? '' : String(row[i]).trim())
 /** Join keys are compared case-insensitively — Meta sometimes lowercases macro output. */
 const norm = (s) => String(s || '').trim().toLowerCase()
 
-/** "25.06.2025" -> "2025-06-25"; returns null on anything else. */
-function toIso(ddmmyyyy) {
-  const m = /^(\d{2})\.(\d{2})\.(\d{4})/.exec(String(ddmmyyyy).trim())
-  return m ? `${m[3]}-${m[2]}-${m[1]}` : null
+/** "2026-10-14 15:23" -> "2026-10-14"; returns null on anything else. */
+function toIso(stamp) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(stamp).trim())
+  return m ? m[1] : null
 }
 
 function bump(map, key, qual) {
@@ -211,7 +244,9 @@ function diagnose({ baseline, rowsTotal, inWindow, rate }) {
     return {
       reason: 'no_rows_in_window',
       message: `В окне дашборда нет ни одной строки CRM (в таблице всего ${rowsRu(rowsTotal)}).`,
-      hint: `Проверьте фильтр на вкладке "${SHEET_TAB}", формат дат в колонке B и MIN_DATE.`,
+      hint:
+        `Проверьте фильтр на вкладке "${SHEET_TAB}", формат дат в колонке C «Создан» ` +
+        `и CRM_MIN_DATE (${CRM_MIN_DATE}).`,
     }
   }
   if (rate < 50) {
@@ -220,7 +255,8 @@ function diagnose({ baseline, rowsTotal, inWindow, rate }) {
       message: `Склейка CRM с Meta ${rate.toFixed(1)}% — ниже порога 50%.`,
       hint:
         'Строки на месте, но не сходятся по UTM. Проверьте, что в объявлениях остались ' +
-        'utm_campaign={{campaign.name}} и utm_content={{ad.name}}.',
+        'utm_campaign={{campaign.name}}, utm_content={{ad.name}}, utm_id={{campaign.id}}, ' +
+        'и что Tilda передаёт UTM в Bitrix.',
     }
   }
   return null
@@ -242,19 +278,26 @@ async function main() {
     console.log('▶ No baseline available (first run, or dashboard unreachable) — drop check skipped')
   }
 
-  const url =
-    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq` +
-    `?tqx=out:csv&sheet=${encodeURIComponent(SHEET_TAB)}`
-  console.log(`▶ CRM sheet ${SHEET_ID} · tab "${SHEET_TAB}"`)
+  let csv
+  if (CRM_CSV_FILE) {
+    console.log(`▶ CRM from local file ${CRM_CSV_FILE} (dry run, sheet not fetched)`)
+    csv = await fs.readFile(CRM_CSV_FILE, 'utf8')
+  } else {
+    const url =
+      `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq` +
+      `?tqx=out:csv&sheet=${encodeURIComponent(SHEET_TAB)}`
+    // never the full id: Actions logs of this repo are public and the sheet is open by link
+    console.log(`▶ CRM sheet …${SHEET_ID.slice(-6)} · tab "${SHEET_TAB}"`)
 
-  const res = await fetch(url, { redirect: 'follow' })
-  if (!res.ok) {
-    throw new Error(
-      `sheet fetch failed: HTTP ${res.status}. ` +
-        'If link sharing was turned off, switch to a service account + Sheets API.',
-    )
+    const res = await fetch(url, { redirect: 'follow' })
+    if (!res.ok) {
+      throw new Error(
+        `sheet fetch failed: HTTP ${res.status}. ` +
+          'If link sharing was turned off, switch to a service account + Sheets API.',
+      )
+    }
+    csv = await res.text()
   }
-  const csv = await res.text()
   const rows = parseCsv(csv).filter((r) => r.some((c) => String(c).trim() !== ''))
   if (!rows.length) throw new Error('sheet returned no rows')
 
@@ -275,15 +318,18 @@ async function main() {
   console.log(`  ${body.length} data rows`)
 
   // ---- lookups from the Meta side -------------------------------------------
+  const campById = new Map(ds.campaigns.map((c) => [String(c.id), c]))
   const campByName = new Map(ds.campaigns.map((c) => [norm(c.name), c]))
+  const adsetIds = new Set(ds.adsets.map((s) => String(s.id)))
   const adNameByNorm = new Map() // normalised ad name -> canonical ad name (creative key)
   for (const a of ds.ads) if (!adNameByNorm.has(norm(a.name))) adNameByNorm.set(norm(a.name), a.name)
 
-  const MIN = ds.date_min
+  // The CRM window starts at the later of the Meta window and the qual-rule cutoff.
+  const MIN = ds.date_min > CRM_MIN_DATE ? ds.date_min : CRM_MIN_DATE
   const MAX = ds.date_max
 
   // ---- aggregate -------------------------------------------------------------
-  const daily = new Map() // `${date}|${campaign_id}|${ad_key}` -> {leads,qual}
+  const daily = new Map() // `${date}|${campaign_id}|${adset_id}|${ad_key}` -> {leads,qual}
   const status = new Map() // `${date}|${status}` -> n
   const geo = new Map() // `${date}|${country}` -> {leads,qual}
   const unmatched = {
@@ -317,10 +363,13 @@ async function main() {
     inWindow++
 
     const rawCamp = cell(r, COL.campaign)
+    const rawCampId = cell(r, COL.campaignId)
+    const rawAdset = cell(r, COL.adset)
     const rawAd = cell(r, COL.ad)
-    const isQual = cell(r, COL.qual).toLowerCase() === QUAL_VALUE
+    const isQual = cell(r, COL.qual) === '1'
 
-    if (!rawCamp && !rawAd) {
+    // WhatsApp / calls / office visits carry no UTM at all — not ad traffic.
+    if (!rawCamp && !rawAd && !rawCampId) {
       unmatched.no_utm++
       continue
     }
@@ -330,15 +379,16 @@ async function main() {
       continue
     }
 
-    const camp = campByName.get(norm(rawCamp))
+    const camp = campById.get(rawCampId) || campByName.get(norm(rawCamp))
     if (!camp) {
-      // Older flights (Desa_inv, HunterMob) still produce late leads. They are
-      // excluded on purpose: their spend is outside the window, so counting their
+      // Leads from campaigns outside the Meta window (or another account) are
+      // excluded on purpose: their spend is not in the dataset, so counting their
       // quals would make CPQL wrong. They surface in the diagnostics chip instead.
       unmatched.unknown_campaign++
-      noteExample('unknown_campaign', rawCamp)
+      noteExample('unknown_campaign', rawCamp || rawCampId)
       continue
     }
+    const adsetId = adsetIds.has(rawAdset) ? rawAdset : ''
 
     const adKey = adNameByNorm.get(norm(rawAd)) || null
     if (!adKey) {
@@ -349,10 +399,11 @@ async function main() {
 
     matched++
     if (isQual) qualTotal++
-    bump(daily, `${iso}|${camp.id}|${adKey || ''}`, isQual)
+    bump(daily, `${iso}|${camp.id}|${adsetId}|${adKey || ''}`, isQual)
 
     // campaign_id rides along so the UI can filter these blocks by language too
-    const st = cell(r, COL.status)
+    const code = cell(r, COL.status)
+    const st = code ? STATUS_LABEL[code] || code : ''
     if (st) {
       const k = `${iso}|${camp.id}|${st}`
       status.set(k, (status.get(k) || 0) + 1)
@@ -367,14 +418,22 @@ async function main() {
     sheet_id: SHEET_ID,
     tab: SHEET_TAB,
     fetched_at: new Date().toISOString(),
+    date_min: MIN,
     rows_total: body.length,
     rows_in_window: inWindow,
     rows_matched: matched,
     qual_total: qualTotal,
     daily: [...daily.entries()]
       .map(([k, v]) => {
-        const [date, campaign_id, ad_key] = k.split('|')
-        return { date, campaign_id, ad_key: ad_key || null, leads: v.leads, qual: v.qual }
+        const [date, campaign_id, adset_id, ad_key] = k.split('|')
+        return {
+          date,
+          campaign_id,
+          adset_id: adset_id || null,
+          ad_key: ad_key || null,
+          leads: v.leads,
+          qual: v.qual,
+        }
       })
       .sort((a, b) => (a.date < b.date ? -1 : 1)),
     status: [...status.entries()]
@@ -393,8 +452,11 @@ async function main() {
   }
 
   // ---- cross-check -----------------------------------------------------------
-  const metaLeads = ds.daily.reduce((s, r) => s + r.leads, 0)
-  const metaSpend = ds.daily.reduce((s, r) => s + r.spend, 0)
+  // Measured against Meta inside the CRM window only — the whole-window lead count
+  // would make a healthy join after the cutoff look like a broken one.
+  const metaInWindow = ds.daily.filter((r) => r.date >= MIN && r.date <= MAX)
+  const metaLeads = metaInWindow.reduce((s, r) => s + r.leads, 0)
+  const metaSpend = metaInWindow.reduce((s, r) => s + r.spend, 0)
   const rate = metaLeads ? (matched / metaLeads) * 100 : 0
   console.log('\n──── CRM cross-check ────')
   console.log(`  window            ${MIN} → ${MAX}`)
@@ -484,21 +546,22 @@ async function main() {
       bumpN(byCamp, r.campaign_id, r.leads, r.qual)
       if (r.ad_key) bumpN(byAd, r.ad_key, r.leads, r.qual)
     }
-    const c403 = ds.campaigns.find((c) => c.name.startsWith('403_EN_WW_DESA2'))
+    // Counted independently from the Bitrix export on 19.10.2026 ~18:40 (Kyiv), before
+    // this join existed: 26 FB leads since 14.10 = 26 Meta leads, 8 of them valid.
+    const camp = (prefix) => ds.campaigns.find((c) => c.name.startsWith(prefix))?.id
     const expect = [
-      ['rows in window', inWindow, 251],
-      // 21 rows in the window carry "Qualified", but one belongs to the old
-      // 034_ENG_WW_Desa_inv flight whose spend is outside the window — excluded
-      // on purpose so CPQL stays honest. Hence 20 matched, 1 unknown_campaign.
-      ['qualified (matched)', qualTotal, 20],
-      ['unknown campaign rows', unmatched.unknown_campaign, 3],
-      ['unresolved macro rows', unmatched.macro, 1],
-      ['403 leads', byCamp.get(c403?.id)?.leads, 113],
-      ['403 qualified', byCamp.get(c403?.id)?.qual, 11],
-      ['002_own_one_of_them leads', byAd.get('002_own_one_of_them')?.leads, 109],
-      ['002_own_one_of_them qualified', byAd.get('002_own_one_of_them')?.qual, 10],
+      ['matched to Meta', matched, 26],
+      ['qualified (matched)', qualTotal, 8],
+      ['069 leads', byCamp.get(camp('069_'))?.leads, 16],
+      ['069 qualified', byCamp.get(camp('069_'))?.qual, 5],
+      ['070 leads', byCamp.get(camp('070_'))?.leads, 10],
+      ['070 qualified', byCamp.get(camp('070_'))?.qual, 3],
+      ['001_45 leads', byAd.get('001_45')?.leads, 11],
+      ['001_45 qualified', byAd.get('001_45')?.qual, 3],
+      ['004_150k leads', byAd.get('004_150k')?.leads, 11],
+      ['004_150k qualified', byAd.get('004_150k')?.qual, 3],
     ]
-    console.log('\n──── --verify against the 25.07.2026 snapshot ────')
+    console.log('\n──── --verify against the 19.10.2026 snapshot ────')
     let failed = 0
     for (const [label, got, want] of expect) {
       const ok = got === want

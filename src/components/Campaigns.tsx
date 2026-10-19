@@ -19,8 +19,8 @@ function rankGroups(rows: DailyRow[], keyFn: (r: DailyRow) => string | undefined
 }
 
 /**
- * The CRM export carries campaign and ad, but no ad set — so quals resolve at the
- * campaign and ad levels and the ad-set row honestly shows "—".
+ * Quals resolve at the campaign and ad levels always, and at the ad-set level only when
+ * the CRM export carries the ad set id (utm_term) — otherwise that row honestly shows "—".
  */
 function Cells({ m, crm, hasCrm }: { m: Metrics; crm?: CrmBucket; hasCrm: boolean }) {
   return (
@@ -38,7 +38,7 @@ function Cells({ m, crm, hasCrm }: { m: Metrics; crm?: CrmBucket; hasCrm: boolea
       )}
       {hasCrm && (
         <span className="hidden sm:inline w-16 text-right text-mute">
-          {crm?.qual ? moneySmart(m.spend / crm.qual) : '—'}
+          {crm?.qual ? moneySmart(m.spend_crm / crm.qual) : '—'}
         </span>
       )}
       <span className="hidden sm:inline w-14 text-right text-dim">{pct(m.ctr)}</span>
@@ -75,19 +75,22 @@ export default function Campaigns({
   const maxSpend = Math.max(1, ...camps.map((c) => c.m.spend))
   const hasCrm = !!crmRows
 
-  // campaign_id -> bucket, and `campaign_id|ad name` -> bucket
+  // campaign_id -> bucket, adset_id -> bucket, and `campaign_id|ad name` -> bucket
   const byCamp = new Map<string, CrmBucket>()
+  const byAdset = new Map<string, CrmBucket>()
   const byCampAd = new Map<string, CrmBucket>()
-  for (const r of crmRows || []) {
-    for (const key of [r.campaign_id, r.ad_key ? `${r.campaign_id}|${r.ad_key}` : null]) {
-      if (!key) continue
-      const target = key === r.campaign_id ? byCamp : byCampAd
-      const b = target.get(key) || { leads: 0, qual: 0 }
-      b.leads += r.leads
-      b.qual += r.qual
-      target.set(key, b)
-    }
+  const add = (target: Map<string, CrmBucket>, key: string, r: CrmDaily) => {
+    const b = target.get(key) || { leads: 0, qual: 0 }
+    b.leads += r.leads
+    b.qual += r.qual
+    target.set(key, b)
   }
+  for (const r of crmRows || []) {
+    add(byCamp, r.campaign_id, r)
+    if (r.adset_id) add(byAdset, r.adset_id, r)
+    if (r.ad_key) add(byCampAd, `${r.campaign_id}|${r.ad_key}`, r)
+  }
+  const hasAdsetCrm = !!ds.crm?.daily.some((r) => r.adset_id)
 
   return (
     <section>
@@ -95,7 +98,7 @@ export default function Campaigns({
         title="Кампании"
         subtitle={
           'Клик по кампании → адсеты → объявления. Сортировка по расходу.' +
-          (hasCrm ? ' В выгрузке CRM нет адсета, поэтому квалы там — прочерк.' : '')
+          (hasCrm && !hasAdsetCrm ? ' В выгрузке CRM нет адсета, поэтому квалы там — прочерк.' : '')
         }
         right={
           <div className="hidden sm:flex items-center gap-2 text-[11px] uppercase tracking-wide text-dim">
@@ -148,6 +151,7 @@ export default function Campaigns({
                       rows={c.rows}
                       openAdset={openAdset}
                       setOpenAdset={setOpenAdset}
+                      byAdset={hasAdsetCrm ? byAdset : null}
                       byCampAd={byCampAd}
                       hasCrm={hasCrm}
                     />
@@ -170,6 +174,7 @@ function AdsetList({
   rows,
   openAdset,
   setOpenAdset,
+  byAdset,
   byCampAd,
   hasCrm,
 }: {
@@ -177,6 +182,8 @@ function AdsetList({
   rows: DailyRow[]
   openAdset: string | null
   setOpenAdset: (v: string | null) => void
+  /** null when the CRM export has no ad set — the row then shows "—" */
+  byAdset: Map<string, CrmBucket> | null
   byCampAd: Map<string, CrmBucket>
   hasCrm: boolean
 }) {
@@ -196,7 +203,7 @@ function AdsetList({
               <span className="min-w-0 flex-1 truncate text-sm text-mute" title={adset?.name}>
                 {adset?.name || s.id}
               </span>
-              <Cells m={s.m} hasCrm={hasCrm} />
+              <Cells m={s.m} crm={byAdset ? byAdset.get(s.id) : undefined} hasCrm={hasCrm} />
             </button>
             {open && <AdList idx={idx} rows={s.rows} byCampAd={byCampAd} hasCrm={hasCrm} />}
           </div>

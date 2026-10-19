@@ -6,21 +6,24 @@ import { int, pct } from '../lib/format'
 import { COLORS, STATUS_ORDER } from '../config'
 
 const HINT =
-  'Статусы сделок из CRM за выбранный период. Это состояние на сейчас, а не путь лида: ' +
-  'сделка видна только в том статусе, где стоит сегодня.'
+  'Стадии лидов в Bitrix за выбранный период. Это состояние на сейчас, а не путь лида: ' +
+  'лид виден только в той стадии, где стоит сегодня. Поэтому квалов в KPI может быть больше, ' +
+  'чем лидов в Re-contact и Qualified: квал засчитывается и тому, кто был в Re-contact, а потом ушёл.'
 
-/** Colour ramp: cold grey at the top of the pipeline → gold at the meeting stage. */
+/** Colour ramp: cold grey at the top of the pipeline → green at the qualified stages. */
 const TINT: Record<string, string> = {
-  '01.New Lead': COLORS.impressions,
-  '03. No Responce': COLORS.dim,
-  '04.Replied': COLORS.ctr,
-  '05.Qualified': COLORS.qual,
-  '06.Meeting Set': COLORS.gold,
-  '07.Online Meeting': COLORS.gold,
+  '01. Новый': COLORS.impressions,
+  '02. Messengers': COLORS.ctr,
+  '03. BASE': COLORS.dim,
+  '04. Не дозвонились 1 раз': COLORS.dim,
+  '05. Не дозвонились 2 раза': COLORS.dim,
+  '06. Не дозвонились 3 раза': COLORS.dim,
+  '07. Re-contact': COLORS.qual,
+  '08. Qualified': COLORS.gold,
 }
 
-/** Terminal loss — tinted red so it never reads as another rung of the ladder. */
-const isLost = (s: string) => /ЗАКРЫТО|НЕ РЕАЛИЗОВАНО|отказ/i.test(s)
+/** Terminal loss — the pipeline prefixes these with "×"; tinted red, below the ladder. */
+const isLost = (s: string) => s.startsWith('×')
 
 export default function SalesFunnel({
   ds,
@@ -38,22 +41,23 @@ export default function SalesFunnel({
   return (
     <Card className="p-5">
       <SectionTitle
-        title="Статусы сделок"
-        subtitle={`${int(total)} сделок в CRM за период`}
+        title="Стадии лидов"
+        subtitle={`${int(total)} лидов из рекламы в CRM за период`}
         right={<InfoDot text={HINT} />}
       />
 
       {ladder.length === 0 ? (
-        <div className="py-6 text-center text-dim text-sm">Нет сделок за период</div>
+        <div className="py-6 text-center text-dim text-sm">Нет лидов за период</div>
       ) : (
         <div className="space-y-2">
-          {ladder.map((r) => {
+          {ladder.map((r, i) => {
             const lost = isLost(r.status)
+            const firstLost = lost && !isLost(ladder[i - 1]?.status || '')
             const color = TINT[r.status] || (lost ? COLORS.neg : COLORS.mute)
             return (
               <div
                 key={r.status}
-                className={`flex items-center gap-3 ${lost ? 'pt-2 mt-1 border-t border-line2' : ''}`}
+                className={`flex items-center gap-3 ${firstLost ? 'pt-2 mt-1 border-t border-line2' : ''}`}
               >
                 <span className="w-36 shrink-0 truncate text-xs text-mute" title={r.status}>
                   {r.status}

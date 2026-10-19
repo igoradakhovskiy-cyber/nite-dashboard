@@ -1,6 +1,6 @@
 import type { Dataset, Metrics } from '../types'
 import { aggregate } from '../lib/data'
-import { int, money, moneySmart, pct } from '../lib/format'
+import { dateShort, int, money, moneySmart, pct } from '../lib/format'
 import { Card, InfoDot } from './ui'
 import { COLORS, QUAL_HINT } from '../config'
 
@@ -71,6 +71,10 @@ export default function KpiGrid({ ds, metrics }: { ds: Dataset; metrics: Metrics
   )
   const hasCrm = m.qual_leads !== null
   const cplOk = m.cpl <= ds.plan.cpl
+  // PLAN_QUAL / PLAN_CPQL default to 0 = "no target set": show that plainly instead of
+  // "plan 0 · ∞%" and a CPQL that is permanently red against a $0 goal.
+  const hasQualPlan = ds.plan.qual > 0
+  const hasCpqlPlan = ds.plan.cpql > 0
   const cpqlOk = (m.cpql ?? 0) <= ds.plan.cpql
 
   return (
@@ -113,11 +117,19 @@ export default function KpiGrid({ ds, metrics }: { ds: Dataset; metrics: Metrics
             accent={COLORS.qual}
             hint={QUAL_HINT}
           >
-            <div className="mt-3 text-[11px] text-dim">
-              план месяца {int(ds.plan.qual)} ·{' '}
-              {pct(((month.qual_leads || 0) / ds.plan.qual) * 100, 1)}
-            </div>
-            <Progress value={month.qual_leads || 0} target={ds.plan.qual} color={COLORS.qual} />
+            {hasQualPlan ? (
+              <>
+                <div className="mt-3 text-[11px] text-dim">
+                  план месяца {int(ds.plan.qual)} ·{' '}
+                  {pct(((month.qual_leads || 0) / ds.plan.qual) * 100, 1)}
+                </div>
+                <Progress value={month.qual_leads || 0} target={ds.plan.qual} color={COLORS.qual} />
+              </>
+            ) : (
+              <div className="mt-3 text-[11px] text-dim">
+                {ds.crm?.date_min ? `считаются с ${dateShort(ds.crm.date_min)}` : 'за период'} · план не задан
+              </div>
+            )}
           </Hero>
         )}
 
@@ -125,24 +137,32 @@ export default function KpiGrid({ ds, metrics }: { ds: Dataset; metrics: Metrics
           <Hero
             label="Цена квал-лида"
             value={m.qual_leads ? moneySmart(m.cpql!) : '—'}
-            accent={cpqlOk ? COLORS.pos : COLORS.neg}
+            accent={!hasCpqlPlan ? COLORS.qual : cpqlOk ? COLORS.pos : COLORS.neg}
             hint={QUAL_HINT}
           >
-            <div className="mt-3 text-[11px] text-dim">
-              цель ≤ {money(ds.plan.cpql)} ·{' '}
-              {m.qual_leads ? (
-                <span style={{ color: cpqlOk ? COLORS.pos : COLORS.neg }}>
-                  {cpqlOk ? 'в цели' : 'выше цели'}
-                </span>
-              ) : (
-                <span>нет квалов за период</span>
-              )}
-            </div>
-            <Progress
-              value={ds.plan.cpql}
-              target={Math.max(m.cpql || 0, ds.plan.cpql)}
-              color={cpqlOk ? COLORS.pos : COLORS.neg}
-            />
+            {hasCpqlPlan ? (
+              <>
+                <div className="mt-3 text-[11px] text-dim">
+                  цель ≤ {money(ds.plan.cpql)} ·{' '}
+                  {m.qual_leads ? (
+                    <span style={{ color: cpqlOk ? COLORS.pos : COLORS.neg }}>
+                      {cpqlOk ? 'в цели' : 'выше цели'}
+                    </span>
+                  ) : (
+                    <span>нет квалов за период</span>
+                  )}
+                </div>
+                <Progress
+                  value={ds.plan.cpql}
+                  target={Math.max(m.cpql || 0, ds.plan.cpql)}
+                  color={cpqlOk ? COLORS.pos : COLORS.neg}
+                />
+              </>
+            ) : (
+              <div className="mt-3 text-[11px] text-dim">
+                {m.qual_leads ? 'цель не задана' : 'нет квалов за период'}
+              </div>
+            )}
           </Hero>
         )}
       </div>

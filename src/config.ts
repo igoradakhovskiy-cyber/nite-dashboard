@@ -32,8 +32,10 @@ export const LANG_LABEL: Record<string, string> = { ru: 'RU', en: 'EN', de: 'DE'
 // Meta lead action types are consistent for this account (lead == fb_pixel_lead == onsite_web_lead).
 export const LEAD_HINT = 'Лид = событие «lead» из Meta (совпадает с pixel/onsite-лидом)'
 export const QUAL_HINT =
-  'Квал-лид = «Qualified» в колонке F выгрузки CRM. Привязан к дате создания лида, ' +
-  'поэтому за последние дни цифра ещё дорастёт.'
+  'Квал-лид = лид, который хоть раз был в стадии Re-contact или Qualified в Bitrix ' +
+  '(правило NITE: Re-contact — первая ступень квалификации). Считается только по лидам ' +
+  'с 14.10.2026 — раньше CRM вели иначе, а CPQL делит только расход с этой даты. ' +
+  'Привязан к дате создания лида, поэтому за последние дни цифра ещё дорастёт.'
 
 /**
  * Manual rebuild = the "Run workflow" button on the Actions page.
@@ -104,12 +106,18 @@ export const QUAL_EST_HINT =
   'у которого 70% лидов пришло из Reels, отдаёт в Reels 7. Считается отдельно по каждому ' +
   'объявлению, а не общим средним. Фактические цифры — расход, показы, клики, лиды и CPL.'
 
-/** Sales-pipeline ladder, in the order the CRM statuses actually progress. */
+/**
+ * Lead-stage ladder in Bitrix order. Labels come from STATUS_LABEL in fetch-crm.mjs —
+ * the two lists must stay in sync. Losses ("× …") are not listed: they sort by size
+ * below the ladder.
+ */
 export const STATUS_ORDER = [
-  '01.New Lead',
-  '03. No Responce',
-  '04.Replied',
-  '05.Qualified',
-  '06.Meeting Set',
-  '07.Online Meeting',
+  '01. Новый',
+  '02. Messengers',
+  '03. BASE',
+  '04. Не дозвонились 1 раз',
+  '05. Не дозвонились 2 раза',
+  '06. Не дозвонились 3 раза',
+  '07. Re-contact',
+  '08. Qualified',
 ]

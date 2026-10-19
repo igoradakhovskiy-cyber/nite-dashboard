@@ -73,6 +73,8 @@ export interface CreativeGroup {
 export interface CrmDaily {
   date: string
   campaign_id: string
+  /** Meta ad set id from utm_term; absent on CRM exports that carry no ad set. */
+  adset_id?: string | null
   ad_key: string | null // null when the ad no longer exists in the account
   leads: number
   qual: number
@@ -127,6 +129,8 @@ export interface Crm {
   sheet_id: string
   tab: string
   fetched_at: string
+  /** First day quals are counted for — earlier CRM history is excluded on purpose. */
+  date_min?: string
   rows_total: number
   rows_in_window: number
   rows_matched: number
@@ -181,9 +185,11 @@ export interface Metrics {
   cpm: number
   cpc: number
   ctr: number
-  // CRM layer — null only when the dataset has no crm block at all
+  /** Spend on days the CRM layer covers (crm.date_min onwards) — the only spend CPQL may divide. */
+  spend_crm: number
+  // CRM layer — null when the dataset has no crm block, or the period ends before it starts
   crm_leads: number | null // leads the CRM actually recorded (≠ Meta leads)
   qual_leads: number | null
-  cpql: number | null // spend / qualified leads
+  cpql: number | null // spend_crm / qualified leads
   qual_rate: number | null // qualified / crm_leads, %
 }
